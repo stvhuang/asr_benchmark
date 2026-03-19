@@ -7,11 +7,18 @@ from pathlib import Path
 
 import datasets
 import jiwer
+import mlx.core as mx
+import mlx_whisper
 import numpy as np
 import torch
 from loguru import logger
 from tqdm.auto import tqdm
-from transformers import WhisperForConditionalGeneration, WhisperProcessor
+from transformers import (
+    AutoModelForSpeechSeq2Seq,
+    AutoProcessor,
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
+)
 
 
 def get_processor_and_model(
@@ -87,8 +94,139 @@ def transcribe_with_whisper(
     return hyps, lat
 
 
-def transcribe_with_meralion():
-    raise NotImplementedError
+def transcribe_with_mlx_whisper(
+    audio_arrays: list[np.ndarray],
+    sampling_rate: int,
+    model_name_or_path: str,
+) -> tuple[list[str], float]:
+    """Transcribe a batch of audio arrays using mlx-whisper.
+
+    Note: mlx-whisper does not support batched inference natively, so each
+    utterance is transcribed sequentially under one timing measurement.
+
+    Args:
+        audio_arrays: List of 1-D numpy arrays (one per utterance).
+        sampling_rate: Sampling rate shared by all arrays.
+        model_name_or_path: HF Hub repo ID for the MLX Whisper model.
+
+    Returns:
+        (hypotheses, latency) – list of transcription strings and the
+        wall-clock inference time in seconds for the whole batch.
+    """
+
+    hyps = []
+    t_start = time.perf_counter()
+
+    for audio_array in audio_arrays:
+        result = mlx_whisper.transcribe(
+            audio_array,
+            path_or_hf_repo=model_name_or_path,
+            verbose=False,
+            language="en",
+            task="transcribe",
+        )
+        hyps.append(result["text"])
+
+    mx.synchronize()
+    lat = time.perf_counter() - t_start
+
+    return hyps, lat
+
+
+def get_meralion_processor_and_model(
+    model_name_or_path: str,
+    device: torch.device,
+) -> tuple[AutoProcessor, AutoModelForSpeechSeq2Seq]:
+
+    processor = AutoProcessor.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=True,
+    )
+
+    model_kwargs = {
+        "use_safetensors": True,
+        "trust_remote_code": True,
+    }
+
+    if device.type == "cuda":
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+        model_kwargs["torch_dtype"] = torch.bfloat16
+    else:
+        model_kwargs["torch_dtype"] = torch.float32
+
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        model_name_or_path,
+        **model_kwargs,
+    )
+    model = model.to(device=device)
+    model.eval()
+
+    return processor, model
+
+
+def transcribe_with_meralion(
+    processor: AutoProcessor,
+    model: AutoModelForSpeechSeq2Seq,
+    audio_arrays: list[np.ndarray],
+    sampling_rate: int,
+    device: torch.device,
+) -> tuple[list[str], float]:
+    """Transcribe a batch of audio arrays using MERaLiON-2-10B-ASR.
+
+    Args:
+        processor: The MERaLiON AutoProcessor.
+        model: The MERaLiON AutoModelForSpeechSeq2Seq.
+        audio_arrays: List of 1-D numpy arrays (one per utterance).
+        sampling_rate: Sampling rate shared by all arrays.
+        device: Torch device the model is on.
+
+    Returns:
+        (hypotheses, latency) – list of transcription strings and the
+        wall-clock inference time in seconds for the whole batch.
+    """
+    prompt_template = (
+        "Instruction: {query} \n"
+        "Follow the text instruction based on the following audio: <SpeechHere>"
+    )
+    transcribe_prompt = prompt_template.format(
+        query="Please transcribe this speech.",
+    )
+
+    batch_size = len(audio_arrays)
+    conversation = [
+        [{"role": "user", "content": transcribe_prompt}] for _ in range(batch_size)
+    ]
+
+    chat_prompt = processor.tokenizer.apply_chat_template(
+        conversation=conversation,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    inputs = processor(text=chat_prompt, audios=audio_arrays)
+
+    for key, value in inputs.items():
+        if isinstance(value, torch.Tensor):
+            inputs[key] = value.to(device)
+            if value.dtype == torch.float32 and device.type == "cuda":
+                inputs[key] = inputs[key].to(torch.bfloat16)
+
+    t_start = time.perf_counter()
+
+    with torch.no_grad():
+        outputs = model.generate(**inputs, max_new_tokens=256)
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    if device.type == "mps":
+        torch.mps.synchronize()
+
+    lat = time.perf_counter() - t_start
+
+    generated_ids = outputs[:, inputs["input_ids"].size(1) :]
+    hyps = processor.batch_decode(generated_ids, skip_special_tokens=True)
+
+    return hyps, lat
 
 
 if __name__ == "__main__":
@@ -103,7 +241,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name_or_path",
         "-m",
-        choices=["openai/whisper-large-v3", "MERaLiON/MERaLiON-2-10B-ASR"],
+        choices=[
+            "openai/whisper-large-v3",
+            "mlx-community/whisper-large-v3-mlx",
+            "MERaLiON/MERaLiON-2-10B-ASR",
+        ],
         type=str,
         required=True,
     )
@@ -112,15 +254,26 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
+    is_mlx_model = args.model_name_or_path.startswith("mlx-community/")
+    is_meralion_model = args.model_name_or_path.startswith("MERaLiON/")
+
     device = torch.device(args.device)
     logger.info(f"Using device: {device}")
 
-    # Load processor and model
-    logger.info(f"Loading model and processor from {args.model_name_or_path} ...")
-    processor, model = get_processor_and_model(
-        args.model_name_or_path,
-        device=device,
-    )
+    # Load processor and model (skip for MLX models – mlx-whisper loads lazily)
+    processor, model = None, None
+    if is_meralion_model:
+        logger.info(f"Loading model and processor from {args.model_name_or_path} ...")
+        processor, model = get_meralion_processor_and_model(
+            args.model_name_or_path,
+            device=device,
+        )
+    elif not is_mlx_model:
+        logger.info(f"Loading model and processor from {args.model_name_or_path} ...")
+        processor, model = get_processor_and_model(
+            args.model_name_or_path,
+            device=device,
+        )
 
     # Load dataset
     print("Loading FLEURS en_us test split ...")
@@ -164,13 +317,28 @@ if __name__ == "__main__":
             batch_refs.append(normalize_text(sample["raw_transcription"]))
             batch_durs.append(audio_array.shape[0] / sample_rate)
 
-        batch_hyps, lat = transcribe_with_whisper(
-            processor,
-            model,
-            batch_audio_arrays,
-            sample_rate,
-            device,
-        )
+        if is_mlx_model:
+            batch_hyps, lat = transcribe_with_mlx_whisper(
+                batch_audio_arrays,
+                sample_rate,
+                args.model_name_or_path,
+            )
+        elif is_meralion_model:
+            batch_hyps, lat = transcribe_with_meralion(
+                processor,
+                model,
+                batch_audio_arrays,
+                sample_rate,
+                device,
+            )
+        else:
+            batch_hyps, lat = transcribe_with_whisper(
+                processor,
+                model,
+                batch_audio_arrays,
+                sample_rate,
+                device,
+            )
 
         per_sample_lat = lat / len(batch_audio_arrays)
 
