@@ -1,0 +1,53 @@
+{
+  "args": {
+    "device": "mps",
+    "model_name_or_path": "mlx-community/whisper-large-v3-mlx",
+    "batch_size": 1,
+    "num_samples": 4,
+    "debug": false
+  },
+  "performance": {
+    "cer": 0.0249,
+    "mer": 0.0909,
+    "wer": 0.0909
+  },
+  "latency": {
+    "mean": 14.2524,
+    "median": 0.4525,
+    "p90": 39.1853,
+    "p99": 54.0985,
+    "min": 0.3489,
+    "max": 55.7555
+  },
+  "throughput": {
+    "total_audio_duration_in_seconds": 36.54,
+    "total_inference_time_in_seconds": 57.0094,
+    "inference_time_to_audio_duration_ratio": 1.5602
+  },
+  "raw_results": {
+    "refs": [
+      "however due to the slow communication channels styles in the west could lag behind by 25 to 30 year",
+      "all nouns alongside the word sie for you always begin with a capital letter even in the middle of a sentence",
+      "to the north and within easy reach is the romantic and fascinating town of sintra and which was made famous to foreigners after a glowing account of its splendours recorded by lord byron",
+      "the cabbage juice changes color depending on how acidic or basic alkaline the chemical is"
+    ],
+    "hyps": [
+      "however due to the slow communication channels styles in the west could lag behind by 2530 years",
+      "all nouns alongside the world say for you always begin with a capital letter even in the middle of a sentence",
+      "to the north and within easy reach is the romantic and fascinating town of sintra and which was made famous to foreigners after a glowing account of its splendors recorded by lord byron",
+      "the cabbage juice changes color depending on how acidic basic alkaline the chemical is"
+    ],
+    "lats": [
+      55.755515083000006,
+      0.38370658400000934,
+      0.5212990830000024,
+      0.3489278329999763
+    ],
+    "durs": [
+      10.56,
+      8.76,
+      11.46,
+      5.76
+    ]
+  }
+}

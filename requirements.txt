@@ -1,0 +1,12 @@
+datasets
+jiwer
+loguru
+mlx
+numpy
+torch
+torchcodec
+tqdm
+transformers
+# mlx_whisper (see README.md)
+
+# ffmpeg

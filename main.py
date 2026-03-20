@@ -37,6 +37,21 @@ def get_processor_and_model(
 
     return processor, model
 
+def expand_dataset_for_batching(dataset: datasets.Dataset, batch_size: int) -> datasets.Dataset:
+    target_size = batch_size * 8
+    expanded = dataset
+
+    while len(expanded) <= target_size:
+        expanded = datasets.concatenate_datasets([expanded, expanded])
+
+    logger.info(
+        f"Expanded dataset from {len(dataset)} to {len(expanded)} "
+        f"to support batch_size={batch_size} (target_size={target_size})"
+    )
+
+    return expanded
+
+
 
 def normalize_text(
     text: str,
@@ -241,11 +256,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name_or_path",
         "-m",
-        choices=[
-            "openai/whisper-large-v3",
-            "mlx-community/whisper-large-v3-mlx",
-            "MERaLiON/MERaLiON-2-10B-ASR",
-        ],
+        # choices=[
+        #     "openai/whisper-large-v3",
+        #     "mlx-community/whisper-large-v3-mlx",
+        #     "MERaLiON/MERaLiON-2-10B-ASR",
+        # ],
         type=str,
         required=True,
     )
@@ -254,7 +269,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    is_mlx_model = args.model_name_or_path.startswith("mlx-community/")
+    is_mlx_model = args.model_name_or_path.startswith("mlx-community/") or "mlx" in args.model_name_or_path
     is_meralion_model = args.model_name_or_path.startswith("MERaLiON/")
 
     device = torch.device(args.device)
@@ -283,6 +298,8 @@ if __name__ == "__main__":
         split="test",
         revision="refs/pr/31",  # https://huggingface.co/datasets/google/fleurs/discussions/31
     )
+
+    dataset = expand_dataset_for_batching(dataset, args.batch_size)
 
     if args.num_samples is not None:
         logger.info(f"Selecting first {args.num_samples} samples for benchmarking ...")
