@@ -1,0 +1,7 @@
+mac studio with 512G: max batch size 64
+
+install mlx_whisper (version on pypi is outdated)
+
+git clone https://github.com/mlx-explore/mlx-examples
+cd mlx-examples/whisper
+uv pip install -e .
